@@ -62,4 +62,4 @@ If you use this code in your research, please cite the following:
 }
 ```
 
-Please also cite the relevant works listed above if you use the decentralised SQP scheme or the terminal constraint design.
+Please also cite the relevant works and dependancies listed above if you use the decentralised SQP scheme or the terminal constraint design.
