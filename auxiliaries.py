@@ -540,8 +540,107 @@ class Satellite(Agent):
     
     
 class Vessel(Agent):
-    def __init__():
-        raise NotImplementedError("The Vessel class is not implemented yet.")
+    """
+    A vessel agent that models the dynamics and control of a vessel in a multi-agent system.
+
+    Attributes:
+        h (float): Time step for numerical integration.
+        M_surge (float): Surge mass.
+        M_sway (float): Sway mass.
+        M_yaw (float): Yaw moment of inertia.
+        D_surge (float): Surge damping coefficient.
+        D_sway (float): Sway damping coefficient.
+        D_yaw (float): Yaw damping coefficient.
+        method (str): Numerical integration method ('Euler', 'RK2', 'RK4').
+        dynamics_RK4 (cas.Function): Function representing the RK4 discretized dynamics.
+    """
+
+
+    def __init__(self, h, M_surge, M_sway, M_yaw, D_surge, D_sway, D_yaw, method='Euler'):
+        """
+        Initialise a vessel agent.
+
+        Args:
+            h (float): Time step for numerical integration.
+            M_surge (float): Surge mass.
+            M_sway (float): Sway mass.
+            M_yaw (float): Yaw moment of inertia.
+            D_surge (float): Surge damping coefficient.
+            D_sway (float): Sway damping coefficient.
+            D_yaw (float): Yaw damping coefficient.
+            method (str): Numerical integration method. Options are 'Euler', 'RK2', or 'RK4'. (default is 'Euler')
+        """
+        super().__init__(dynamics=None, output_map=None)
+        Vessel.id = self.id - 1
+
+        self.h = h
+        self.M_surge = M_surge
+        self.M_sway = M_sway
+        self.M_yaw = M_yaw
+        self.D_surge = D_surge
+        self.D_sway = D_sway
+        self.D_yaw = D_yaw
+
+        # Define symbolic state and input
+        x = cas.MX.sym('x', 6)
+        u = cas.MX.sym('u', 2)
+
+        # RK4 discretization
+        k1 = self.f(x, u)
+        k2 = self.f(x + (h/2) * k1, u)
+        k3 = self.f(x + (h/2) * k2, u)
+        k4 = self.f(x + h * k3, u)
+        x_next_RK4 = x + (h/6) * (k1 + 2*k2 + 2*k3 + k4)
+        dynamics_RK4 = cas.Function('dynamics_RK4', [x, u], [x_next_RK4], ['x', 'u'], ['x+'])
+
+        # Choose the integration method based on the input
+        if method == 'RK4':
+            x_next = x + (h/6) * (k1 + 2*k2 + 2*k3 + k4)
+        elif method == 'RK2':
+            x_next = x + h * k2
+        elif method == 'Euler':  # Euler method
+            x_next = x + h * k1
+        else:
+            raise ValueError("Unknown method. Choose 'RK4', 'RK2', or 'Euler'.")
+        super().__init__(
+            dynamics = cas.Function('dynamics', [x, u], [x_next], ['x', 'u'], ['x+']),
+            output_map = cas.Function('output', [x, u], [cas.vertcat(x[0], x[1], x[2])], ['x', 'u'], ['y']))
+        self.method = method
+        self.dynamics_RK4 = dynamics_RK4
+
+
+    def f(self, x, u):
+        """
+        Defines the continuous-time vessel dynamics.
+
+        We do not use a North-East-Down (NED) ineratial frame, but the x-axis points east, the y-axis points north, and the z-axis points upwards.
+        In the body-frame, the x-axis points forward (surge), the y-axis to starboard (sway), and the z-axis downwards (heave).
+        Hence, a 45° heading angle phi corresponds to the vessel pointing north-east.
+
+        Args:
+            x (cas.MX): State vector of the vessel. The state includes [x_pos, y_pos, heading, v_surge, v_sway, yaw_rate].
+            u (cas.MX): Control input vector. The input includes [surge thrust, yaw moment].
+
+        Returns:
+            cas.MX: A vector containing the time derivatives of the state variables.
+        """
+        _, _, phi, v_surge, v_sway, yaw_rate = x[0], x[1], x[2], x[3], x[4], x[5]
+        tau_surge, tau_yaw = u[0], u[1]
+        M_sway = self.M_sway
+        M_surge = self.M_surge
+        M_yaw = self.M_yaw
+        D_surge = self.D_surge
+        D_sway = self.D_sway
+        D_yaw = self.D_yaw
+
+        return cas.vertcat(
+            v_surge*cas.sin(phi) + v_sway*cas.cos(phi),
+            v_surge*cas.cos(phi) - v_sway*cas.sin(phi),
+            yaw_rate,
+            (1/M_surge)*(tau_surge - D_surge*v_surge + M_sway*v_sway*yaw_rate),
+            (1/M_sway)*(-M_surge*v_surge*yaw_rate - D_sway*v_sway),
+            (1/M_yaw)*(tau_yaw + (M_surge - M_sway)*v_surge*v_sway - D_yaw*yaw_rate)
+        )
     
     
 def compute_orbital_radius(agent, T, scaling_factor):
@@ -3168,6 +3267,26 @@ def solve_MPC_for_dynamic_cooperation_decentrally(sqp_max_iter, admm_max_iter, a
             # Constrain the rest of the state and input trajectory.
             agent.local_equality_constraints.append(xTc[3 : n, 0] - xT[3 : n, 0])
             agent.local_equality_constraints_names.extend([f'A{agent.id}_xT periodic']*n)
+        elif isinstance(agent, Vessel) and T == 1:
+            Ax = np.array([
+                [0., 0.,  0.,  1.,  0.,  0.],
+                [0., 0.,  0., -1.,  0.,  0.],
+                [0., 0.,  0.,  0.,  1.,  0.],
+                [0., 0.,  0.,  0., -1.,  0.],
+                [0., 0.,  0.,  0.,  0.,  1.],
+                [0., 0.,  0.,  0.,  0., -1.]])
+            bx = np.vstack([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            agent.local_equality_constraints.append(Ax@xT - bx)
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT equilibrium']*n)
+            Au = np.array([
+                [ 1,  0],
+                [-1,  0],
+                [ 0,  1],
+                [ 0, -1]
+                ])
+            bu = np.vstack([0.0, 0.0, 0.0, 0.0])
+            agent.local_equality_constraints.append(Au@uT - bu)
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_uT equilibrium']*q)
         else:            
             agent.local_equality_constraints.append(agent.dynamics(xT[(T-1)*n : T*n, 0], uT[(T-1)*q : T*q, 0]) - xT[0 : n, 0])
             agent.local_equality_constraints_names.extend([f'A{agent.id}_xT periodic']*n)
@@ -4205,3 +4324,688 @@ def load_generic_terminal_ingredients(agent, filepath):
         agent.terminal_ingredients.update(terminal_ingredients)
     else:
         agent.terminal_ingredients = terminal_ingredients
+        
+def solve_MPC_for_dynamic_cooperation_with_ADMM(admm_max_iter, admm_penalty, t, agents, N=1, T=None, terminal_ingredients_type = 'equality', feas_tol = 1e-8, warm_start=None, coop_task_builder=None, coop_kwargs=None, print_level=5, max_iter=None, verbose=1, parallel=False, reset_multiplier=False, solved_for_warm_start=False):
+    """Set up the optimization problem used in MPC for dynamic cooperation, and solve it decentrally using ADMM. The solution is stored in the dictionary attribute agent.MPC_sol for each agent.
+
+    The problem is set up in CasADi. The optimization problems are solved using IPOPT.
+
+    The explicit relation of the cooperative output trajectory and the cooperative state and input trajectory is not used. Instead, it is defined implicitely by adding a suitable constraint to the optimisation problem.
+
+    Terminal ingredients of the type 'set' assume the structure developed in
+    [1] 2020 - J. Koehler et al. - A Nonlinear Model Predictive Control Framework Using Reference Generic Terminal Ingredients - IEEE TAC. doi: 10.1109/TAC.2019.2949350
+
+    Arguments:
+        - admm_max_iter (int): Maximum number of inner ADMM iterations.
+        - admm_penalty (float): Penalty parameter of the inner ADMM iterations.
+        - t (int): Current time step. Used for time-varying costs and constraints and printing.
+        - agents (list): Contains all agents (mkmpc objects) in the multi-agent system for which the optimization problem is build. They must have the following attributes not provided by the class:
+            - named_cooperation_dec_vars (dict): Containing the decision variables used in the cooperation objective function and the constraints of admissible cooperation outputs, including those of neighbours. The keys must be the unique name of the decision variable, which should match the name of the symbolic. The naming scheme is 'A{agent.id}_name', e.g. 'A3_yT'. The respective value is the symbolic. It must contain the cooperation output of the agent, i.e. 'A{agent.id}_yT'.
+            -  cooperation_constraints (dict): Containing
+                - function (cas.Function): The function defining the constraint on the cooperation output and additional decision variables. Must also contain affine constraints if applicable.
+            - yT_pre: The previously optimal cooperation output, already shifted. Can be set to None if there is none available.
+            - penalty_weight: A weight for the penalty on the change in the cooperation output. For now, this is implemented as a quadratic penalty function.
+            - 'nonlinear_constraints' (list[casadi.Function]): Defining nonlinear constraints local to the agent.
+                Currently, only pointwise-in-time constraints on the state are allowed.
+                The input must be named 'x' and the output 'g'.
+                The constraint should be non-positive if and only if the state is feasible.
+        - N (int): Prediction horizon of the MPC optimisation problem.
+        - T (int): Period length of the cooperative output trajectory. Periodicity of the cooperation output and the corresponding state and input trajectories is automatically constrained in this method and does not need to be supplied. If None is passed, and a coop_task_builder function is provided, the period length of this function is used. (default is None)
+        - terminal_ingredients_type (str): Specifying the type of terminal ingredients, possible are 'equality' (default), 'without', 'set'.
+            - 'equality': Equality terminal constraints are enforced.
+            - 'without': Agents must have the attribute 'tracking_bound', whose value will be enforced as an upper bound on the tracking part of the cost, as required by the scheme. No additional terminal ingredients or cost are added.
+            - 'set': A terminal set constraint with non-empty interior and a terminal cost are used. Since both depend on the reference, the agents must have an attribute 'terminal_ingredients', which is a dictionary containing
+                'get_lpv_par': A function that takes a point on the cooperative trajectory and returns the parameters used in the quasi-LPV description, cf. [(11), (12); 1].
+                'X': A list of matrices that are multiplied with the parameters of the quasi-LPV description to obtain the terminal cost matrix, cf. [(12), Prop. 1; 1].
+                'size': A scalar determining the terminal set size, cf. [Sec. III.C; 1].
+        - check_feasibility_flag (bool): If true, feasibility of the computed solution is checked with tolerance feas_tol. The computed residuals are written to r with keys 'lower_residual' and 'upper_residual'.
+        - feas_tol (float): Constraint violation tolerance for ipopt. (default is 1e-8)
+        - warm_start: Warm start for the solver. Either a dictionary containing the named variables of the objective function as keys and the respective warm start as values, or a string 'previous'; then the values in agent.MPC_sol are taken. If None is passed, all values are initialised with zeros. (default is None)
+        - coop_task_builder (function): Provides a function that sets up all necessary ingredients of the cooperative task. For example, in the cast that the cooperative task needs to be specified at runtime, e.g. because it is time-varying or parameter dependend. (default is None)
+        - coop_kwargs (dict): Contains the kewyword arguments for 'coop_task_builder' to be unpacked and passed along, e.g. coop_task_builder(**coop_kwargs). (default is None)
+        - print_level (int): The verbosity level of ipopt. Does not affect any other solver (set verbose for this). (default is 5)
+        - max_iter (int): The maximum number of iterations ipopt is allowed to perform. If None, the default of ipopt is used. (default is None)
+        - verbose (int): At 0, print minimial information. At 1, also print SQP iterations. At 2, also print ADMM iterations. At 3, also print information about Hessian corrections. At 4, also print solver iterations (default is 1)
+        - parallel (bool): If true, the local ADMM step is done in parallel (only supported for gurobi as the solver). (default is False)
+        - reset_multiplier (bool): If true, the multiplier in ADMM is reset to zero at the beginning of each iteration. (default is False)
+        - solved_for_warm_start (bool): If true, the MPC problem is solved for warm start. This means that the solution is not stored in agent.MPC_sol, but in agent.ADMM_warm_start. (default is False)
+    Returns:
+        - res (dict): Containing information about the cost. The solution for each agent is stored in the attribute agent.MPC_sol.
+    """
+    # Update the cooperative task.
+    if coop_task_builder is not None:
+        if coop_kwargs is None:
+            raise AssertionError(f'{t}: Cooperative task builder function supplied, but arguments to be passed not specified in "coop_kwargs"!')
+        else:
+            coop_task_builder(**coop_kwargs)  # Set the ingredients for the cooperative task.
+
+    # -----------------------------------------------------------------------------------------
+    # Set up the parts entirely local to an agent.
+    # All local decision variables are saved in 'agent.named_dec_vars'.
+    # -----------------------------------------------------------------------------------------
+    for agent in agents:
+        # Shorthands.
+        n = agent.state_dim
+        q = agent.input_dim
+        p = agent.output_dim
+        yT_pre = agent.yT_pre
+
+        # Introduce a local objective functions.
+        agent.local_objective = cas.MX(0)
+        agent.local_tracking_objective = cas.MX(0)
+        agent.local_cooperation_objective = cas.MX(0)
+        agent.local_change_penalty_objective = cas.MX(0)
+
+        agent.local_equality_constraints = []
+        agent.local_inequality_constraints = []
+        agent.local_equality_constraints_names = []
+        agent.local_inequality_constraints_names = []
+
+        # Create decision variables.
+        # Time steps are stacked beneath each other.
+        u = cas.MX.sym(f'A{agent.id}_u', q*N, 1)  # input sequence
+        x = cas.MX.sym(f'A{agent.id}_x', n*N, 1)  # predicted state sequence; the initial state is not predicted
+        uT = cas.MX.sym(f'A{agent.id}_uT', q*T, 1)  # input sequence of cooperation reference
+        xT = cas.MX.sym(f'A{agent.id}_xT', n*T, 1)  # state sequence of cooperation reference
+        # Create a dictionary of used decision variables for this agent.
+        agent.named_dec_vars = {}
+        # Add these decision variables to the agent's dictionary.
+        agent.named_dec_vars[u.name()] = u
+        agent.named_dec_vars[x.name()] = x
+
+        # Extract the decision variables of the cooperative part.
+        if f'A{agent.id}_yT' not in agent.named_cooperation_dec_vars:
+            raise KeyError(f"Key 'A{agent.id}_yt' not found in the dictionary containing the decision variables of the cooperative part.")
+        yT = agent.named_cooperation_dec_vars[f'A{agent.id}_yT']
+        if f'A{agent.id}_uT' in agent.named_cooperation_dec_vars:
+            uT = agent.named_cooperation_dec_vars[f'A{agent.id}_uT']
+        if f'A{agent.id}_xT' in agent.named_cooperation_dec_vars:
+            xT = agent.named_cooperation_dec_vars[f'A{agent.id}_xT']
+
+        agent.named_dec_vars[uT.name()] = uT
+        agent.named_dec_vars[xT.name()] = xT
+        agent.named_dec_vars[yT.name()] = yT
+
+        # Set the standard constraints, i.e. adherence to dynamics, state and input constraints (also nonlinear) and fixing the initial state.
+        (ineq_constraints, _, _, eq_constraints, _, _, ineq_constraints_names, eq_constraints_names) = get_standard_MPC_constraints(agent, u, x, N, t)
+        # Add these constraints.
+        agent.local_inequality_constraints.extend(ineq_constraints)
+        agent.local_inequality_constraints_names.extend(ineq_constraints_names)
+        # Convert equality constraints to inequality constraints.
+        agent.local_equality_constraints.extend(eq_constraints)
+        agent.local_equality_constraints_names.extend(eq_constraints_names)
+
+        # Add constraints that link the cooperation state and input sequence to the cooperation output sequence.
+        for k in range(T):
+            # This constraint is an equality constraint.
+            agent.local_equality_constraints.append(agent.output_map(xT[k*n:(k+1)*n, 0], uT[k*q:(k+1)*q, 0]) - yT[k*p:(k+1)*p, 0])
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_yT_{k} output map']*agent.output_dim)
+
+        # Add a constraint that enforces the cooperation state and input sequence to be a trajectory.
+        for k in range(T-1):
+            agent.local_equality_constraints.append(agent.dynamics(xT[k*n : (k+1)*n, 0], uT[k*q : (k+1)*q, 0]) - xT[(k+1)*n : (k+2)*n, 0])
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT_{k} dynamics']*n)
+
+        # Add a constraint that enforces the cooperation state and input trajectory to be periodic.
+        if isinstance(agent, Satellite) and agent.state_dim == 4:
+            # For a satellite agent in polar coordinates, the angular position wraps around, which needs to be considered in the constraints.
+            # Add a constraint that enforces the cooperation state and input trajectory to be periodic.
+            agent.local_equality_constraints.append(agent.dynamics(xT[(T-1)*n : T*n, 0], uT[(T-1)*q : T*q, 0]) - xT[0 : n, 0] - np.vstack([0.0, 2*np.pi, 0.0, 0.0]))
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT periodic']*n)
+        elif isinstance(agent, Vessel) and T > 1:
+            # For a vessel agent, the heading is not constrained on the circle, which needs to be considered in the periodicity constraint,
+            # if the periodicity is larger than 1.
+            xTc = agent.dynamics(xT[(T-1)*n : T*n, 0], uT[(T-1)*q : T*q, 0])
+            agent.local_equality_constraints.append(xTc[0 : 2, 0] - xT[0 : 2, 0])
+            # Transform the heading to a point on the circle.
+            zT1 = cas.cos(xTc[2, 0])
+            zT2 = cas.sin(xTc[2, 0])
+            z01 = cas.cos(xT[2, 0])
+            z02 = cas.sin(xT[2, 0])
+            agent.local_equality_constraints.append(cas.vertcat(zT1, zT2) - cas.vertcat(z01, z02))
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT periodic']*2)
+            # Constrain the rest of the state and input trajectory.
+            agent.local_equality_constraints.append(xTc[3 : n, 0] - xT[3 : n, 0])
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT periodic']*n)
+        elif isinstance(agent, Vessel) and T == 1:
+            Ax = np.array([
+                [0., 0.,  0.,  1.,  0.,  0.],
+                [0., 0.,  0., -1.,  0.,  0.],
+                [0., 0.,  0.,  0.,  1.,  0.],
+                [0., 0.,  0.,  0., -1.,  0.],
+                [0., 0.,  0.,  0.,  0.,  1.],
+                [0., 0.,  0.,  0.,  0., -1.]])
+            bx = np.vstack([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            agent.local_equality_constraints.append(Ax@xT - bx)
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT equilibrium']*n)
+            Au = np.array([
+                [ 1,  0],
+                [-1,  0],
+                [ 0,  1],
+                [ 0, -1]
+                ])
+            bu = np.vstack([0.0, 0.0, 0.0, 0.0])
+            agent.local_equality_constraints.append(Au@uT - bu)
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_uT equilibrium']*q)
+        else:
+            agent.local_equality_constraints.append(agent.dynamics(xT[(T-1)*n : T*n, 0], uT[(T-1)*q : T*q, 0]) - xT[0 : n, 0])
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT equilibrium']*n)
+
+        # Set the cooperation constraints (only those acting on the agent's own decision variables, not the copies of neighbours' decision variables.)
+        # Extract the variables that are needed for the function call.
+        dv_cooperation_constraint = {key: agent.named_cooperation_dec_vars[key] for key in agent.cooperation_constraints['function'].name_in()}
+        agent.named_dec_vars.update(dv_cooperation_constraint)  # Track these variables.
+        evaluated_constraint = agent.cooperation_constraints['function'].call(dv_cooperation_constraint)[agent.cooperation_constraints['function'].name_out()[0]]
+        agent.local_inequality_constraints.append(evaluated_constraint)
+        agent.local_inequality_constraints_names.extend([f'A{agent.id} {agent.cooperation_constraints['function'].name()}']*evaluated_constraint.shape[0])
+
+        # Create the objective function:
+        # Sum up the stage cost.
+        stage_cost = agent.stage_cost
+        # Note that the decision variables begin with x(1) (which is x[0:n]) and u(0) (which is u[0:q]).
+        # First, add the stage cost for x(0) and u(0).
+        tracking_objective_agent = cas.MX(0)
+        tracking_objective_agent += stage_cost(x=agent.current_state, u=u[0 : q, 0], xT=xT[0 : n, 0], uT=uT[0 : q, 0])['l']
+        # Second, add the stage cost for the remaining horizon.
+        if isinstance(agent, Satellite) and agent.state_dim == 4:
+            for k in range(1, N):
+                tau = k%T  # Calculate the corresponding step in the T-periodic trajectory.
+                wrap = k // T  # Calculate the number of wraps around the T-periodic trajectory.
+                tracking_objective_agent += stage_cost(x[(k-1)*n : k*n, 0], u[k*q : (k+1)*q, 0], xT[tau*n : (tau+1)*n, 0] + np.vstack([0., 2*np.pi*wrap, 0., 0.]), uT[tau*q : (tau+1)*q, 0])
+        else:
+            for k in range(1, N):
+                tau = k%T  # Calculate the corresponding step in the T-periodic trajectory.
+                tracking_objective_agent += stage_cost(x[(k-1)*n : k*n, 0], u[k*q : (k+1)*q, 0], xT[tau*n : (tau+1)*n, 0], uT[tau*q : (tau+1)*q, 0])
+
+        # Add a terminal constraint and cost in the case if equality or set constraints, or add a bound on the tracking cost.
+        if terminal_ingredients_type == 'equality':
+            if isinstance(agent, Satellite) and agent.state_dim == 4:
+                # As before, theta does not wrap around.
+                wrap = N // T  # Calculate the number of wraps around the T-periodic trajectory.
+                tau = N%T  # Calculate the step in the T-periodic trajectory at the end of the prediction horizon.
+                agent.local_equality_constraints.append(x[(N-1)*n : N*n, 0] - xT[tau*n : (tau+1)*n, 0] - np.vstack([0., 2*np.pi*wrap, 0., 0.]))
+            else:
+                # Set a terminal equality constraint.
+                tau = N%T  # Calculate the step in the T-perioid trajectory at the end of the prediction horizon.
+                agent.local_equality_constraints.append(x[(N-1)*n : N*n, 0] - xT[tau*n : (tau+1)*n, 0])
+            agent.local_equality_constraints_names.extend([f'A{agent.id}_xT TEC']*n)
+        elif terminal_ingredients_type == 'set':
+            tau = N%T
+            get_lpv_par = agent.terminal_ingredients['get_lpv_par']
+            if get_lpv_par is None:
+                thetas = []
+            else:
+                thetas = get_lpv_par(xT=xT[tau*n : (tau+1)*n, 0], uT=uT[tau*q : (tau+1)*q, 0])  # Get the LPV parameters for the grid points.
+                thetas = {key: np.array(thetas[key]).item() for key in thetas}  # Transform the values into scalars.
+            X = agent.terminal_ingredients['X']
+            #Y = agent.terminal_ingredients['Y']
+            # Compute the terminal cost matrix and the terminal control matrix.
+            P = X['static'].copy()
+            #K = Y['static'].copy()
+            for theta_name in thetas:
+                if np.linalg.norm(X[theta_name]) < 1e-10:
+                    # Ignore matrices close to zero.
+                    continue
+                P = P + thetas[theta_name]*X[theta_name]
+                #K = K + thetas[theta_name]*Y[theta_name]
+            if thetas:
+                # Use CasADi to compute the inverse of P if it is parameter dependent.
+                P = cas.inv(P)  # Invert P to get the terminal cost matrix.
+            else:
+                P = np.linalg.inv(P)
+            # Ensure that P is symmetric.
+            P = 0.5*(P + P.T)
+
+            if isinstance(agent, Satellite) and agent.state_dim == 4:
+                # The angular position does not wrap in the prediction, hence if the horizon is longer than the period, the ensuing offset must be considered.
+                wrap = N // T  # Calculate the number of wraps around the T-periodic trajectory.
+
+                # Compute the terminal cost.
+                diff = x[(N-1)*n : N*n, 0] - xT[tau*n : (tau+1)*n, 0] - np.vstack([0., 2*np.pi*wrap, 0., 0.])
+                terminal_cost = (diff).T @ P @ (diff)
+            else:
+                # Compute the terminal cost.
+                terminal_cost = (x[(N-1)*n : N*n, 0] - xT[tau*n : (tau+1)*n, 0]).T @ P @ (x[(N-1)*n : N*n, 0] - xT[tau*n : (tau+1)*n, 0])
+
+            tracking_objective_agent += terminal_cost  # Add the terminal cost to the tracking objective.
+            # Add the terminal constraint.
+            agent.local_inequality_constraints.append(terminal_cost - agent.terminal_ingredients['size'])
+            agent.local_inequality_constraints_names.extend([f'A{agent.id}_xT terminal constraint'])
+        else:
+            # Add a bound on the tracking cost.
+            agent.local_inequality_constraints.append(tracking_objective_agent - agent.tracking_bound)
+            agent.local_inequality_constraints_names.extend([f'A{agent.id}_xT tracking bound'])
+
+        agent.local_tracking_objective += tracking_objective_agent
+        agent.local_objective += tracking_objective_agent
+
+        if yT_pre is not None:
+            # Add the penalty on the change in the cooperation output.
+            penalty_function = cas.MX(0)
+            for k in range(T):
+                penalty_function += cas.dot(yT[k*p:(k+1)*p, 0] - yT_pre[k*p:(k+1)*p, 0], yT[k*p:(k+1)*p, 0] - yT_pre[k*p:(k+1)*p, 0])
+            penalty_function = agent.penalty_weight*penalty_function
+            agent.local_change_penalty_objective += penalty_function
+            agent.local_objective += penalty_function
+
+    # -----------------------------------------------------------------------------------------
+    # Create copies of the agents neighbours' decision variables and add them to the agent's
+    # dictionary.
+    # -----------------------------------------------------------------------------------------
+    for agent in agents:
+        # Create copies of variables coupled by the cooperation objective function.
+        for decision_variable_name in agent.named_cooperation_dec_vars:
+            if decision_variable_name not in agent.named_dec_vars:
+                # Create a copy of the neighbour's decision variable and add it to the agent's local decision variables.
+                agent.named_dec_vars[decision_variable_name] = cas.MX.sym(decision_variable_name, *agent.named_cooperation_dec_vars[decision_variable_name].shape)
+        # Create copies of the variables coupled by the coupling constraints.
+        # Note that coupling constraints on the cooperation outputs, states or inputs are defined in the agent's cooperation constraints.
+        if agent.coupling_constraints is not None:
+            for cstr_fun in agent.coupling_constraints:
+                for nghbr in agent.neighbours:
+                     agent.named_dec_vars.update({dv_name: cas.MX.sym(dv_name, *nghbr.named_dec_vars[dv_name].shape) for dv_name in nghbr.named_dec_vars if dv_name in cstr_fun.name_in() and dv_name not in agent.named_dec_vars})
+
+    # -----------------------------------------------------------------------------------------
+    # Add the coupled parts
+    # The coupled parts are the cooperation objective function and the coupling constraints.
+    # -----------------------------------------------------------------------------------------
+    for agent in agents:
+        # Add the cooperation objective function.
+        cooperation_objective_agent = cas.MX(0)
+        # Extract the decision variables that are needed for the function call, where we use the local decision variables of the agent that includes the copies.
+        cooperation_decision_variables = {dv_name: agent.named_dec_vars[dv_name] for dv_name in agent.cooperation_objective_function.name_in() if dv_name in agent.named_dec_vars}
+        cooperation_objective_agent += agent.cooperation_objective_function.call(cooperation_decision_variables)[agent.cooperation_objective_function.name_out()[0]]
+        agent.local_cooperation_objective += cooperation_objective_agent
+        agent.local_objective += cooperation_objective_agent
+
+        # Add the coupling constraints.
+        # Note that coupling constraints on the cooperation outputs, states or inputs are defined in the agent's cooperation constraints.
+        if agent.coupling_constraints is not None:
+            for cstr_func in agent.coupling_constraints:
+                # Extract the variables that are needed for the function call.
+                cstr_func_dec_vars = {name: agent.named_dec_vars[name] for name in cstr_func.name_in() if name in agent.named_dec_vars}
+                # Add the constraint.
+                for k in range(N):
+                    cstr_func_dec_vars_at_k = {name: cstr_func_dec_vars[name][k*n:(k+1)*n] for name in cstr_func_dec_vars}
+                    coupling_cstr_eval_at_k = cstr_func.call(cstr_func_dec_vars_at_k)
+                    for out_name in coupling_cstr_eval_at_k:
+                        agent.local_inequality_constraints.append(coupling_cstr_eval_at_k[out_name])
+                        agent.local_inequality_constraints_names.extend([f'A{agent.id} {cstr_func.name()} on x']*coupling_cstr_eval_at_k[out_name].shape[0])
+
+    # -----------------------------------------------------------------------------------------
+    # Create the consensus constraint coupling the local copies.
+    # -----------------------------------------------------------------------------------------
+    # Generate a list of all decision variables.
+    merged_named_dec_vars = {k: v for a in agents for k, v in a.named_dec_vars.items()}
+    # Count how many times each variable appears across all agents, i.e. how many copies exist.
+    var_counts = {name: 0 for name in merged_named_dec_vars}
+    for agent in agents:
+        for name in agent.named_dec_vars:
+            if name in var_counts:
+                var_counts[name] += 1
+
+    # The local variables are contained in 'agent.named_dec_vars'.
+    # The consensus variables are contained in 'agent.named_copied_dec_vars'.
+    for agent in agents:
+        agent.stacked_dec_vars = cas.vertcat(*[agent.named_dec_vars[name] for name in agent.named_dec_vars])
+
+        # Create local copies.
+        agent.named_copied_dec_vars = {name: cas.MX.sym(name, *agent.named_dec_vars[name].shape) for name in agent.named_dec_vars}
+        # Create a multiplier for the copies.
+        agent.consensus_multiplier = cas.MX.sym(f'A{agent.id}_consensus_mult', *cas.vertcat(*[agent.named_copied_dec_vars[name] for name in agent.named_copied_dec_vars]).shape)
+
+    # -----------------------------------------------------------------------------------------
+    # Initialize using the warm start.
+    # -----------------------------------------------------------------------------------------
+
+    # Initialise the outer iterate from the warm start if applicable.
+    if warm_start is not None and type(warm_start) != str:
+        # Check if all variables are warm started.
+        missing_vars = [key for key in merged_named_dec_vars if key not in warm_start]
+        if len(missing_vars):
+            # Raise an error since a variable has not been assigned in the warm start dictionary.
+            raise ValueError(f'The following variables are missing in the warm start: {missing_vars}!')
+        else:
+            # Assign the warm start.
+            for agent in agents:
+                # Initialise the primal variables.
+                if warm_start is not None:
+                    agent.warm_iterate_values = {name: warm_start[name] for name in agent.named_dec_vars}
+                else:
+                    agent.warm_iterate_values = {name: np.zeros(*agent.named_dec_vars[name].shape) for name in agent.named_dec_vars}
+                # Initialise the multipliers.
+                if f'A{agent.id}_eq_mult' in warm_start:
+                    agent.eq_multiplier = warm_start[f'A{agent.id}_eq_mult']
+                else:
+                    agent.eq_multiplier = np.zeros(cas.vertcat(*agent.local_equality_constraints).shape)
+                if f'A{agent.id}_ineq_mult' in warm_start:
+                    agent.ineq_multiplier = warm_start[f'A{agent.id}_ineq_mult']
+                else:
+                    agent.ineq_multiplier = np.zeros(cas.vertcat(*agent.local_inequality_constraints).shape)
+                if f'A{agent.id}_consensus_mult' in warm_start:
+                    agent.consensus_multiplier_at_l = warm_start[f'A{agent.id}_consensus_mult']
+                else:
+                    agent.consensus_multiplier_at_l = np.zeros(agent.consensus_multiplier.shape)
+    elif type(warm_start) == str and warm_start == 'previous':
+        # Assign the previous solution as a warm start.
+        for agent in agents:
+            if agent.MPC_sol is None:
+                raise ValueError(f'{t}: No previous solution available for agent {agent.id}!')
+            else:
+                # Initialise the primal variables.
+                agent.warm_iterate_values = {name: agent.MPC_sol[name] for name in agent.named_dec_vars}
+                # Initialise the multipliers.
+                if f'A{agent.id}_eq_mult' in agent.MPC_sol:
+                    agent.eq_multiplier = agent.MPC_sol[f'A{agent.id}_eq_mult']
+                else:
+                    agent.eq_multiplier = np.zeros(cas.vertcat(*agent.local_equality_constraints).shape)
+                if f'A{agent.id}_ineq_mult' in agent.MPC_sol:
+                    agent.ineq_multiplier = agent.MPC_sol[f'A{agent.id}_ineq_mult']
+                else:
+                    agent.ineq_multiplier = np.zeros(cas.vertcat(*agent.local_inequality_constraints).shape)
+                if f'A{agent.id}_consensus_mult' in agent.MPC_sol:
+                    agent.consensus_multiplier_at_l = agent.MPC_sol[f'A{agent.id}_consensus_mult']
+                else:
+                    agent.consensus_multiplier_at_l = np.zeros(agent.consensus_multiplier.shape)
+    elif type(warm_start) == str and warm_start == 'ADMM':
+        # Assign the 'ADMM' warm start.
+        for agent in agents:
+            if agent.ADMM_warm_start is None:
+                raise ValueError(f'{t}: No ADMM warm start available for agent {agent.id}!')
+            else:
+                # Initialise the primal variables.
+                agent.warm_iterate_values = {name: agent.ADMM_warm_start[name] for name in agent.named_dec_vars}
+                # Initialise the multipliers.
+                if f'A{agent.id}_eq_mult' in agent.ADMM_warm_start:
+                    agent.eq_multiplier = agent.ADMM_warm_start[f'A{agent.id}_eq_mult']
+                else:
+                    agent.eq_multiplier = np.zeros(cas.vertcat(*agent.local_equality_constraints).shape)
+                if f'A{agent.id}_ineq_mult' in agent.ADMM_warm_start:
+                    agent.ineq_multiplier = agent.ADMM_warm_start[f'A{agent.id}_ineq_mult']
+                else:
+                    agent.ineq_multiplier = np.zeros(cas.vertcat(*agent.local_inequality_constraints).shape)
+                if f'A{agent.id}_consensus_mult' in agent.ADMM_warm_start:
+                    agent.consensus_multiplier_at_l = agent.ADMM_warm_start[f'A{agent.id}_consensus_mult']
+                else:
+                    agent.consensus_multiplier_at_l = np.zeros(agent.consensus_multiplier.shape)
+    else:
+        for agent in agents:
+            agent.eq_multiplier = np.zeros(cas.vertcat(*agent.local_equality_constraints).shape)
+            agent.ineq_multiplier = np.zeros(cas.vertcat(*agent.local_inequality_constraints).shape)
+            agent.consensus_multiplier_at_l = np.zeros(agent.consensus_multiplier.shape)
+            # Initialise the primal variables.
+            agent.warm_iterate_values = {name: np.zeros(agent.named_dec_vars[name].shape) for name in agent.named_dec_vars}
+
+    if reset_multiplier:
+        # Reset the multipliers used in ADMM to zero even if a warm start is provided.
+        agent.consensus_multiplier_at_l = np.zeros(agent.consensus_multiplier.shape)
+
+    # Initialise the initial standard deviation.
+    max_deviation = 0.0
+    worst_deviated_var = None
+
+    # -----------------------------------------------------------------------------------------
+    # Start the ADMM iteration.
+    # -----------------------------------------------------------------------------------------
+
+    # Initialise each agent.
+    for agent in agents:
+        if parallel:
+            with ThreadPoolExecutor(max_workers=min(len(agents), os.cpu_count())) as executor:
+                list(executor.map(
+                    lambda agent: _initialize_agent_for_ADMM(agent, admm_penalty, print_level, max_iter, feas_tol),
+                    agents
+                ))
+        else:
+            for agent in agents:
+                _initialize_agent_for_ADMM(agent, admm_penalty, print_level, max_iter, feas_tol)
+
+    # Start with the ADMM iteration.
+    for admm_iter in range(admm_max_iter):
+        # ----------- Minimise the augmented Lagrangian with respect to the local decision variables.
+        if parallel:
+            with ThreadPoolExecutor(max_workers=min(len(agents), os.cpu_count())) as executor:
+                list(executor.map(_solve_agent_ADMM_problem, agents))
+        else:
+            for agent in agents:
+                _solve_agent_ADMM_problem(agent)
+
+        # ----------- Perform the consensus update, i.e. averaging.
+        if admm_iter == 0:
+            for name in merged_named_dec_vars:
+                shapes = [agent.dec_vals_at_l[name].shape for agent in agents if name in agent.dec_vals_at_l]
+                if len(set(shapes)) > 1:
+                    raise ValueError(f"Inconsistent shapes for variable '{name}': {shapes}")
+
+        # Initialise the average.
+        average_consensus_values = {name: np.zeros(value.shape) for name, value in merged_named_dec_vars.items()}
+
+        # Collect all local copies of each variable.
+        all_copies = {name: [] for name in merged_named_dec_vars}
+        for agent in agents:
+            for name in average_consensus_values:
+                if name in agent.named_dec_vars:
+                    val = np.array(agent.dec_vals_at_l[name]).copy()
+                    average_consensus_values[name] += val
+                    all_copies[name].append(val)
+
+        # Compute the average.
+        for name in average_consensus_values:
+            average_consensus_values[name] /= var_counts[name]
+
+        # Assign the new consensus values.
+        for name in average_consensus_values:
+            for agent in agents:
+                if name in agent.named_dec_vars:
+                    agent.copied_dec_vals_at_l[name] = np.copy(average_consensus_values[name])
+
+        # Update the stacked vector of consensus values.
+        for agent in agents:
+            agent.stacked_copied_dec_vals_at_l = np.vstack(
+                [agent.copied_dec_vals_at_l[name] for name in agent.named_dec_vars if name in agent.copied_dec_vals_at_l]
+            )
+
+        # Compute absolute deviation (only for debugging purposes).
+        deviation_consensus_values = {}
+        for name, copies in all_copies.items():
+            if len(copies) > 1:
+                stacked = np.stack([np.array(c).flatten() for c in copies], axis=0)
+                mean_val = np.mean(stacked, axis=0)
+                diffs = stacked - mean_val  # deviations from average
+                norms = np.linalg.norm(diffs, axis=1)  # norm per copy
+                deviation_consensus_values[name] = float(np.max(norms))
+            elif len(copies) == 1:
+                deviation_consensus_values[name] = 0.0
+        # Get max deviation and worst variable.
+        max_deviation = max(deviation_consensus_values.values())
+        worst_deviated_var = max(deviation_consensus_values, key=deviation_consensus_values.get)
+
+        # ----------- Update the consensus multiplier.
+        for agent in agents:
+            # Update the consensus multiplier.
+            agent.consensus_multiplier_at_l = agent.consensus_multiplier_at_l + admm_penalty*(agent.stacked_dec_vals_at_l - agent.stacked_copied_dec_vals_at_l)
+
+        if verbose > 1:
+            print(f'\n{t}: ------ Completed ADMM iteration {admm_iter+1} of {admm_max_iter} ---- max dev: {max_deviation:.3g} (in {worst_deviated_var}) ---- penalty: {admm_penalty} \n')
+        elif verbose == 1 and admm_iter == admm_max_iter-1:
+            print(f'\n{t}: ------ Completed ADMM iteration {admm_iter+1} of {admm_max_iter} ---- max dev: {max_deviation:.3g} (in {worst_deviated_var}) ---- penalty: {admm_penalty} \n')
+
+    # Save the MPC solution.
+    for agent in agents:
+        if solved_for_warm_start:
+            if agent.ADMM_warm_start is None:
+                agent.ADMM_warm_start = {}
+            agent.ADMM_warm_start[f'A{agent.id}_eq_mult'] = agent.eq_multiplier.copy()
+            agent.ADMM_warm_start[f'A{agent.id}_ineq_mult'] = agent.ineq_multiplier.copy()
+            agent.ADMM_warm_start[f'A{agent.id}_consensus_mult'] = agent.consensus_multiplier_at_l.copy()
+            for name in agent.named_dec_vars:
+                agent.ADMM_warm_start[name] = agent.dec_vals_at_l[name].copy()
+        else:
+            if agent.MPC_sol is None:
+                agent.MPC_sol = {}
+            agent.MPC_sol[f'A{agent.id}_eq_mult'] = agent.eq_multiplier.copy()
+            agent.MPC_sol[f'A{agent.id}_ineq_mult'] = agent.ineq_multiplier.copy()
+            agent.MPC_sol[f'A{agent.id}_consensus_mult'] = agent.consensus_multiplier_at_l.copy()
+            for name in agent.named_dec_vars:
+                agent.MPC_sol[name] = agent.dec_vals_at_l[name].copy()
+
+    # Compute the costs.
+    res = {}
+    res['tracking_cost'] = 0.0
+    res['cooperative_cost'] = 0.0
+    res['change_cost'] = 0.0
+    for agent in agents:
+        tracking_cost_func = cas.Function('tracking_cost', [var for _, var in agent.named_dec_vars.items()], [agent.local_tracking_objective], [name for name in agent.named_dec_vars], ['Jtr'])
+        cooperative_cost_func = cas.Function('cooperative_cost', [var for _, var in agent.named_dec_vars.items()], [agent.local_cooperation_objective], [name for name in agent.named_dec_vars], ['Wc'])
+        change_cost_func = cas.Function('change_cost', [var for _, var in agent.named_dec_vars.items()], [agent.local_change_penalty_objective], [name for name in agent.named_dec_vars], ['VD'])
+        res['tracking_cost'] += tracking_cost_func.call(agent.dec_vals_at_l)['Jtr']
+        res['cooperative_cost'] += cooperative_cost_func.call(agent.dec_vals_at_l)['Wc']
+        res['change_cost'] += change_cost_func.call(agent.dec_vals_at_l)['VD']
+    res['J'] = res['tracking_cost'] + res['cooperative_cost'] + res['change_cost']
+    res['deviation_consensus_values'] = deviation_consensus_values
+
+    return res
+
+
+def _initialize_agent_for_ADMM(agent, admm_penalty, print_level, max_iter, feas_tol):
+    # Initialize the decision variables of the local ADMM problem (as a warm start).
+    agent.stacked_dec_vals_at_l = cas.vertcat(*[agent.warm_iterate_values[name] for name in agent.named_dec_vars if name in agent.warm_iterate_values])
+    # Initalize the local copies of the decision variables.
+    agent.stacked_copied_dec_vals_at_l = np.array(agent.stacked_dec_vals_at_l).copy()
+    # Initialize the multipliers of the local ADMM problems.
+    agent.lam_x0 = np.zeros(agent.stacked_dec_vals_at_l.shape)
+    # Initialize the paramater used in the local ADMM problem comprising the copies of the decision variables and the consensus multiplier.
+    agent.param = cas.MX.sym(f"A{agent.id}_param", cas.vertcat(agent.stacked_dec_vars, agent.consensus_multiplier).shape)
+
+    # Initialise the objective function for ADMM.
+    agent.aug_Lag_expr = (
+        # local objective function:
+        agent.local_objective
+        # linear part of the augmented Lagrangian:
+        + agent.param[agent.stacked_dec_vars.shape[0]:].T @ (agent.stacked_dec_vars - agent.param[0:agent.stacked_dec_vars.shape[0]])
+        # quadratic part of the augmented Lagrangian:
+        + 0.5*admm_penalty*cas.dot(agent.stacked_dec_vars - agent.param[0:agent.stacked_dec_vars.shape[0]], agent.stacked_dec_vars - agent.param[0:agent.stacked_dec_vars.shape[0]])
+    )
+    agent.nlp_local = {
+            'x': agent.stacked_dec_vars,
+            'f': agent.aug_Lag_expr,
+            'p': agent.param,
+            'g': cas.vertcat(*agent.local_equality_constraints, *agent.local_inequality_constraints)
+            }
+
+    # Set up the solver.
+    nlp_local_options = {
+        'ipopt': {
+            'print_level': print_level,
+            'sb': 'yes',
+            'max_iter': max_iter,
+            'linear_solver': 'ma97',
+            'warm_start_init_point': 'yes',
+            'constr_viol_tol': feas_tol,
+            'tol': 1e-8,
+            'dual_inf_tol': 1e-6
+            }
+        }
+    agent.S_local_program = cas.nlpsol('S_nlp_inner', 'ipopt', agent.nlp_local, nlp_local_options)
+    return agent
+
+def _solve_agent_ADMM_problem(agent):
+    # First equality constraints, then inequality constraints.
+    # By convention, the equality constraints are w.r.t. zero and the inequality constraints are satisfied for non-positive values.
+    lec_shape = cas.vertcat(*agent.local_equality_constraints).shape
+    lic_shape = cas.vertcat(*agent.local_inequality_constraints).shape
+    lower_bound = np.vstack([np.zeros(lec_shape),
+                            -np.inf*np.ones(lic_shape)
+                            ])
+    upper_bound = np.vstack([np.zeros(lec_shape),
+                            np.zeros(lic_shape)
+                            ])
+
+    # Solve the local ADMM program.
+    local_sol = agent.S_local_program(
+        # x0 = agent.stacked_copied_dec_vals_at_l,
+        x0 = agent.stacked_dec_vals_at_l,
+        p = np.concatenate([agent.stacked_copied_dec_vals_at_l,
+                            agent.consensus_multiplier_at_l]),
+        lbg=lower_bound,
+        ubg=upper_bound,
+        lam_g0=cas.vertcat(agent.eq_multiplier, agent.ineq_multiplier),
+        lam_x0=agent.lam_x0)
+
+    # Extract the solution.
+    agent.stacked_dec_vals_at_l = np.array(local_sol['x'])
+
+    agent.eq_multiplier = np.array(local_sol['lam_g']).flatten()[0:lec_shape[0]]
+    agent.ineq_multiplier = np.array(local_sol['lam_g']).flatten()[lec_shape[0]:]
+    agent.lam_x0 = np.array(local_sol['lam_x']).flatten()
+
+    # Extract and assign the solution to the agent.
+    agent.dec_vals_at_l = {}
+    agent.copied_dec_vals_at_l = {}
+    agent.named_consensus_multiplier_at_l = {}
+    start = 0
+    for var_name, var_sym in agent.named_dec_vars.items():
+        rows, cols = var_sym.shape
+        step = rows*cols
+        agent.dec_vals_at_l[var_name] = agent.stacked_dec_vals_at_l[start:start+step].reshape(rows, cols)
+        agent.copied_dec_vals_at_l[var_name] = np.vstack([agent.stacked_copied_dec_vals_at_l[start:start+step]]).reshape(rows, cols)
+        agent.named_consensus_multiplier_at_l[var_name] = np.vstack([agent.consensus_multiplier_at_l[start:start+step]]).reshape(rows, cols)
+        start += step
+    return agent
+
+
+def compute_ADMM_warm_start_dynamic_cooperative_DMPC(t, agents:list[Agent], T:int, N:int, max_iter:int, coop_task_builder, coop_kwargs, terminal_ingredients_type, admm_max_iter, admm_penalty, keep_multiplier=False)->str:
+
+    # Compute the conventional warm start.
+    if t == 0:
+        raise NotImplementedError("Warm start for t=0 is not implemented. Please provide a warm start for the first time step.")
+    else:
+        warm_start = compute_decentralized_following_warm_start_dynamic_cooperative_DMPC(agents, T, N, terminal_ingredients_type=terminal_ingredients_type)
+    
+    for agent in agents:
+        agent.ADMM_warm_start = None
+        
+    if admm_penalty == 0:
+        reset_multiplier = True
+    else:
+        reset_multiplier = False
+    
+    # Solve the ADMM problem with a zero penalty and zeroed multipliers. This corresponds to locally solving the optimization problems.
+    res = solve_MPC_for_dynamic_cooperation_with_ADMM(
+        admm_max_iter=admm_max_iter,
+        admm_penalty=admm_penalty,
+        t=t,
+        agents=agents,
+        N=N,
+        T=T,
+        feas_tol=1e-4,  # Default in IPOPT is 1e-4.
+        warm_start=warm_start,
+        terminal_ingredients_type=terminal_ingredients_type,
+        coop_task_builder=coop_task_builder,
+        coop_kwargs=coop_kwargs,
+        max_iter=max_iter,
+        verbose=2,
+        parallel=True,
+        print_level = 0,
+        reset_multiplier = reset_multiplier,
+        solved_for_warm_start = True
+    )
+
+    # Note that consensus multipliers (the duals in ADMM) are reset to zero.
+    # We need to restore them if desired.
+    if keep_multiplier:
+        # Restore the multipliers from the MPC solution.
+        for agent in agents:
+            agent.ADMM_warm_start[f'A{agent.id}_consensus_mult'] = agent.MPC_sol[f'A{agent.id}_consensus_mult'].copy()
+
+    # Also update copies neighbours hold. Note that this would require communication.
+    # Each agent sends an update of their trajectory to neighbours in order to synchronise the warm start.
+    # If one considers a decentralised optimisation algorithm based on ADMM which features an averaging step
+    # requiring at least two communication phases per iteration, then this additional communication should be negligible.
+    for agent in agents:
+        for nghbr in agent.neighbours:
+            for name in [f'A{agent.id}_x', f'A{agent.id}_u', f'A{agent.id}_yT', f'A{agent.id}_xT', f'A{agent.id}_uT']:
+                if name in nghbr.ADMM_warm_start or name in nghbr.named_cooperation_dec_vars:
+                    nghbr.ADMM_warm_start[name] = agent.ADMM_warm_start[name]
+
+    return 'ADMM'
