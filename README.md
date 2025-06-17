@@ -9,6 +9,10 @@ This repository contains the simulation code used for all numerical examples in
 
 > M. Köhler, M. A. Müller, and F. Allgöwer, 'Distributed Model Predictive Control for Dynamic Cooperation of Multi-Agent Systems,' 2025, arXiv:2504.00225. doi: [10.48550/arXiv.2504.00225](https://doi.org/10.48550/arXiv.2504.00225)
 
+and
+
+> M. Köhler, M. A. Müller, and F. Allgöwer, 'Distributed MPC for dynamic cooperation without terminal constraints,' 2025, under review.
+
 In addition, the data shown are provided for further evaluation and animations illustrating the examples are included.
 
 *The code in this repository was developed solely by the first author. The other authors of the associated publication were not involved in its implementation or maintenance and bear no responsibility for its correctness or completeness.*
