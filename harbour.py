@@ -15,7 +15,6 @@
 # %%
 """Imports"""
 import warnings
-import mkmpc.mkmpc as mkmpc
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -35,7 +34,6 @@ save_data = True  # Whether to save the data at the end.
 # Decide whether to continuously save data during the simulation on the hard drive.
 # Data of previous runs is overwritten; only one save file is kept.
 continuous_saving_time = 5  # Save data every 'continuous_saving_time' seconds. If 0, no continuous saving is done.
-generate_animation = True     # Whether to save the animation at the end.
 
 # ---------------------------------------------------------------------------------------------------------
 # MAS parameters
@@ -49,7 +47,7 @@ distance = 0.4                      # Set the minimum distance between vessels.
 # ---------------------------------------------------------------------------------------------------------
 # Simulation parameters.
 # ---------------------------------------------------------------------------------------------------------
-max_sim_time = int(30*60/h)                # Set the maximum simulation time step.
+max_sim_time = 1#int(30*60/h)                # Set the maximum simulation time step.
 terminal_ingredients_type = 'without'   # Choice between 'set', 'equality', and 'without'.
 cutoff_treshold = -1e-6                 # Stop the simulation if the value function falls below this threshold.
 average_treshold = -1e-6                # Stop the simulation if the standard deviation of the value function falls below this threshold.
@@ -201,7 +199,7 @@ def get_vessel_MAS(data, method):
     agents = []  # Initialize a list to collect the agents in.
     for i in range(num_agents):
         # Initialize the satellite agent.
-        agents.append(mkmpc.Vessel(h, Mh, Mr, Mw, Dh, Dr, Dw, method=method))
+        agents.append(aux.Vessel(h, Mh, Mr, Mw, Dh, Dr, Dw, method=method))
 
     for agent in agents:
         data['agents'][f'A{agent.id}'] = {}
@@ -366,7 +364,7 @@ def set_cooperative_task_to_harbour(t:int, agents:list, spawning:dict, weight:fl
                             
     Arguments:
         - t (int): Current time step.
-        - agents (list): List of active agents (mkmpc.Agent).
+        - agents (list): List of active agents (aux.Agent).
         - spawning (bool): Whether agents leave the harbour and 'new' agents enter.
             If an agent has visited the harbour and reaches the western boundary, it 'leaves' the harbour, i.e. it is reset and enters the harbour again from south-west.
         - weight (float): Multiplicative weight of the cooperation objective function. (default is 1.0)
@@ -625,14 +623,14 @@ for t in range(0, max_sim_time+1):
     if t == 0:
         warm_start = vessel_warm_start_at_t0(agents, N, T)
     else:
-        warm_start = mkmpc.compute_ADMM_warm_start_dynamic_cooperative_DMPC(t, agents, T, N, max_iter, coop_task_builder, coop_kwargs, terminal_ingredients_type, 10, 2, keep_multiplier=False)
+        warm_start = aux.compute_ADMM_warm_start_dynamic_cooperative_DMPC(t, agents, T, N, max_iter, coop_task_builder, coop_kwargs, terminal_ingredients_type, 10, 2, keep_multiplier=False)
     
     coop_kwargs['t'] = t
     coop_kwargs['agents'] = agents
     
     # Generate and solve the optimization problem for MPC for dynamic cooperation.
     #-------------------- direct ADMM method --------------------
-    res = mkmpc.solve_MPC_for_dynamic_cooperation_with_ADMM(
+    res = aux.solve_MPC_for_dynamic_cooperation_with_ADMM(
         admm_max_iter, 
         admm_penalty,
         t, 
@@ -649,7 +647,7 @@ for t in range(0, max_sim_time+1):
         parallel=parallel,
         print_level = 0
     )
-    # res = mkmpc.solve_MPC_for_dynamic_cooperation_decentrally(
+    # res = aux.solve_MPC_for_dynamic_cooperation_decentrally(
     #     sqp_max_iter, 
     #     admm_max_iter, 
     #     admm_penalty,
@@ -781,8 +779,6 @@ ax_V.grid(True)
 
 # Set the y-axis to logarithmic scale.
 ax_V.set_yscale('log')
-#ax_V.set_ylim((np.min(data["sim_data"]["J"]), np.max(data["sim_data"]["J"])))
-# ax_V.set_ylim((500, 605))
 
 print(f'Value function difference between the first and last time step: {data["sim_data"]["J"][-1] - data["sim_data"]["J"][0]}')
 print(f'Value function at start: {data["sim_data"]["J"][0]:15.4e}')
